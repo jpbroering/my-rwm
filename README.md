@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: © 2026 Isaac Freund
 SPDX-License-Identifier: 0BSD
 -->
 
-# tinyrwm.c
+# My River Window Manager
 
-Tiny river window manager implemented in C.
+This project is based on the Tiny river window manager implemented in C.
 
 ## Dependencies
 
