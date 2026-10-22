@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2026 Isaac Freund
+# SPDX-FileCopyrightText: © 2026 João Paulo Broering
 # SPDX-License-Identifier: 0BSD
 
 project(
@@ -30,6 +31,7 @@ generated = wl_mod.scan_xml(
 exe = executable(
   'tinyrwm',
   'tinyrwm.c',
+  'lifecycle.c',
   generated,
   dependencies: [
     wayland_client,
@@ -37,3 +39,10 @@ exe = executable(
   ],
   install: true,
 )
+
+lifecycle_test = executable(
+  'test-lifecycle',
+  'tests/test_lifecycle.c',
+  'lifecycle.c',
+)
+test('lifecycle references', lifecycle_test)
