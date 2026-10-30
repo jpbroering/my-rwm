@@ -98,6 +98,15 @@ Add tests as the corresponding components are implemented; do not defer all cove
 5. **IPC and tools:** implement the socket protocol, `tinyrwmctl`, state queries, commands, and events. Test protocol version/errors, permissions, and client interactions.
 6. **Integration and CI:** run protocol-level integration tests with a test compositor or nested River session where practical; run build and automated tests in CI, with compiler warnings and sanitizers where supported.
 
+### Current progress
+
+Step 1 is complete for the baseline lifecycle: protocol interactions and ownership
+are documented in `docs/protocol-lifecycle.md`, stale seat/window references are
+cleared before freeing objects, and removing a seat ends resizing on a surviving
+window. Automated reference and Wayland request tests cover close, removal, and
+manager teardown. These tests run without a compositor; nested River integration
+and CI remain in Step 6.
+
 ## Completion criteria
 
 - All product requirements above are implemented and documented.

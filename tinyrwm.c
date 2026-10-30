@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: © 2026 Isaac Freund
+// SPDX-FileCopyrightText: © 2026 João Paulo Broering
 // SPDX-License-Identifier: 0BSD
 
 #include <signal.h>
@@ -17,6 +18,8 @@
 #include <linux/input-event-codes.h>
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
+
+#include "lifecycle.h"
 
 struct Output {
 	struct river_output_v1 *obj;
@@ -40,8 +43,7 @@ struct Window {
 
 	struct Rect rect;
 
-	struct Seat *pointer_move_requested;
-	struct Seat *pointer_resize_requested;
+	struct WindowSeatRefs seat_refs;
 	uint32_t pointer_resize_requested_edges;
 
 	struct wl_list link; // WindowManager.windows
@@ -82,9 +84,7 @@ struct Seat {
 	bool new;
 	bool removed;
 
-	struct Window *focused;
-	struct Window *hovered;
-	struct Window *interacted;
+	struct SeatWindowRefs window_refs;
 
 	struct wl_list xkb_bindings; // XkbBinding
 	struct wl_list pointer_bindings; // PointerBinding
@@ -92,7 +92,6 @@ struct Seat {
 
 	enum SeatOp op;
 	// For SEAT_OP_MOVE and SEAT_OP_RESIZE
-	struct Window *op_window;
 	int32_t op_start_x, op_start_y;
 	int32_t op_dx, op_dy;
 	bool op_release;
@@ -111,8 +110,12 @@ struct WindowManager {
 
 struct WindowManager wm;
 
+struct wl_display *display;
+struct wl_registry *registry;
 struct river_window_manager_v1 *window_manager_v1;
 struct river_xkb_bindings_v1 *xkb_bindings_v1;
+static bool should_exit;
+static int exit_status;
 
 static void output_handle_removed(void *data, struct river_output_v1 *obj) {
 	struct Output *output = data;
@@ -131,13 +134,17 @@ const struct river_output_v1_listener river_output_listener = {
 	.dimensions = output_handle_dimensions,
 };
 
-static void output_maybe_destroy(struct Output *output) {
-	if (!output->removed) {
+static void output_destroy(struct Output *output, bool manager_finished) {
+	if (!output->removed && !manager_finished) {
 		return;
 	}
 	river_output_v1_destroy(output->obj);
 	wl_list_remove(&output->link);
 	free(output);
+}
+
+static void output_maybe_destroy(struct Output *output) {
+	output_destroy(output, false);
 }
 
 static void window_handle_closed(void *data, struct river_window_v1 *obj) {
@@ -155,13 +162,13 @@ static void window_handle_dimensions(
 static void window_handle_pointer_move_requested(
 		void *data, struct river_window_v1 *obj, struct river_seat_v1 *river_seat) {
 	struct Window *window = data;
-	window->pointer_move_requested = river_seat_v1_get_user_data(river_seat);
+	window->seat_refs.pointer_move_requested = river_seat_v1_get_user_data(river_seat);
 }
 
 static void window_handle_pointer_resize_requested(
 		void *data, struct river_window_v1 *obj, struct river_seat_v1 *river_seat, uint32_t edges) {
 	struct Window *window = data;
-	window->pointer_resize_requested = river_seat_v1_get_user_data(river_seat);
+	window->seat_refs.pointer_resize_requested = river_seat_v1_get_user_data(river_seat);
 	window->pointer_resize_requested_edges = edges;
 }
 
@@ -202,26 +209,32 @@ const struct river_window_v1_listener river_window_listener = {
 	.identifier = window_handle_identifier,
 };
 
-static void window_maybe_destroy(struct Window *window) {
-	if (!window->closed) {
+static void window_destroy(struct Window *window, bool manager_finished) {
+	if (!window->closed && !manager_finished) {
 		return;
 	}
 
 	struct Seat *seat;
 	wl_list_for_each(seat, &wm.seats, link) {
-		if (seat->focused == window) {
-			seat->focused = NULL;
-		}
-		if (seat->op_window == window) {
-			river_seat_v1_op_end(seat->obj);
+		if (seat_refs_clear_window(&seat->window_refs, window)) {
+			if (!seat->removed && !manager_finished) {
+				river_seat_v1_op_end(seat->obj);
+			}
 			seat->op = SEAT_OP_NONE;
-			seat->op_window = NULL;
+			seat->op_dx = 0;
+			seat->op_dy = 0;
 		}
 	}
 
+	river_window_v1_set_user_data(window->obj, NULL);
+	river_node_v1_destroy(window->node);
 	river_window_v1_destroy(window->obj);
 	wl_list_remove(&window->link);
 	free(window);
+}
+
+static void window_maybe_destroy(struct Window *window) {
+	window_destroy(window, false);
 }
 
 static void window_set_position(struct Window *window, int32_t x, int32_t y) {
@@ -239,14 +252,14 @@ static void window_manage(struct Window *window) {
 		window_set_position(window, 0, 0);
 		river_window_v1_propose_dimensions(window->obj, 0, 0);
 	}
-	if (window->pointer_move_requested != NULL) {
-		seat_pointer_move(window->pointer_move_requested, window);
-		window->pointer_move_requested = NULL;
+	if (window->seat_refs.pointer_move_requested != NULL) {
+		seat_pointer_move(window->seat_refs.pointer_move_requested, window);
+		window->seat_refs.pointer_move_requested = NULL;
 	}
-	if (window->pointer_resize_requested != NULL) {
-		seat_pointer_resize(window->pointer_resize_requested, window,
+	if (window->seat_refs.pointer_resize_requested != NULL) {
+		seat_pointer_resize(window->seat_refs.pointer_resize_requested, window,
 				window->pointer_resize_requested_edges);
-		window->pointer_resize_requested = NULL;
+		window->seat_refs.pointer_resize_requested = NULL;
 	}
 }
 
@@ -320,18 +333,18 @@ static void seat_handle_removed(void *data, struct river_seat_v1 *obj) {
 static void seat_handle_pointer_enter(
 		void *data, struct river_seat_v1 *obj, struct river_window_v1 *river_window) {
 	struct Seat *seat = data;
-	seat->hovered = river_window_v1_get_user_data(river_window);
+	seat->window_refs.hovered = river_window_v1_get_user_data(river_window);
 }
 
 static void seat_handle_pointer_leave(void *data, struct river_seat_v1 *obj) {
 	struct Seat *seat = data;
-	seat->hovered = NULL;
+	seat->window_refs.hovered = NULL;
 }
 
 static void seat_handle_window_interaction(
 		void *data, struct river_seat_v1 *obj, struct river_window_v1 *river_window) {
 	struct Seat *seat = data;
-	seat->interacted = river_window_v1_get_user_data(river_window);
+	seat->window_refs.interacted = river_window_v1_get_user_data(river_window);
 }
 
 static void seat_handle_op_delta(void *data, struct river_seat_v1 *obj, int32_t dx, int32_t dy) {
@@ -362,9 +375,15 @@ const struct river_seat_v1_listener river_seat_listener = {
 	.pointer_position = seat_handle_pointer_position,
 };
 
-static void seat_maybe_destroy(struct Seat *seat) {
-	if (!seat->removed) {
+static void seat_destroy(struct Seat *seat, bool manager_finished) {
+	if (!seat->removed && !manager_finished) {
 		return;
+	}
+
+	struct Window *op_window = seat->window_refs.op_window;
+	if (!manager_finished && seat->op == SEAT_OP_RESIZE &&
+			op_window != NULL && !op_window->closed) {
+		river_window_v1_inform_resize_end(op_window->obj);
 	}
 
 	struct XkbBinding *xkb_binding, *xkb_binding_tmp;
@@ -377,9 +396,19 @@ static void seat_maybe_destroy(struct Seat *seat) {
 		pointer_binding_destroy(pointer_binding);
 	}
 
+	struct Window *window;
+	wl_list_for_each(window, &wm.windows, link) {
+		window_refs_clear_seat(&window->seat_refs, seat);
+	}
+	memset(&seat->window_refs, 0, sizeof(seat->window_refs));
+	river_seat_v1_set_user_data(seat->obj, NULL);
 	river_seat_v1_destroy(seat->obj);
 	wl_list_remove(&seat->link);
 	free(seat);
+}
+
+static void seat_maybe_destroy(struct Seat *seat) {
+	seat_destroy(seat, false);
 }
 
 static void seat_focus(struct Seat *seat, struct Window *window) {
@@ -388,7 +417,7 @@ static void seat_focus(struct Seat *seat, struct Window *window) {
 		window = wl_container_of(wm.windows.prev, window, link);
 	}
 
-	if (seat->focused == window) {
+	if (seat->window_refs.focused == window) {
 		return;
 	}
 
@@ -401,14 +430,14 @@ static void seat_focus(struct Seat *seat, struct Window *window) {
 		river_seat_v1_clear_focus(seat->obj);
 	}
 
-	seat->focused = window;
+	seat->window_refs.focused = window;
 }
 
 static void seat_pointer_move(struct Seat *seat, struct Window *window) {
 	seat_focus(seat, window);
 	river_seat_v1_op_start_pointer(seat->obj);
 	seat->op = SEAT_OP_MOVE;
-	seat->op_window = window;
+	seat->window_refs.op_window = window;
 	seat->op_start_x = window->rect.x;
 	seat->op_start_y = window->rect.y;
 	seat->op_dx = 0;
@@ -420,7 +449,7 @@ static void seat_pointer_resize(struct Seat *seat, struct Window *window, uint32
     river_window_v1_inform_resize_start(window->obj);
 	river_seat_v1_op_start_pointer(seat->obj);
 	seat->op = SEAT_OP_RESIZE;
-	seat->op_window = window;
+	seat->window_refs.op_window = window;
 	seat->op_edges = edges;
 	seat->op_start_x = window->rect.x;
 	seat->op_start_y = window->rect.y;
@@ -440,8 +469,8 @@ static void seat_action(struct Seat *seat, enum Action action) {
 		}
 		break;
 	case ACTION_CLOSE:
-		if (seat->focused != NULL) {
-			river_window_v1_close(seat->focused->obj);
+		if (seat->window_refs.focused != NULL) {
+			river_window_v1_close(seat->window_refs.focused->obj);
 		}
 		break;
 	case ACTION_FOCUS_NEXT:
@@ -452,13 +481,13 @@ static void seat_action(struct Seat *seat, enum Action action) {
 		}
 		break;
 	case ACTION_MOVE:
-		if (seat->op == SEAT_OP_NONE && seat->hovered != NULL) {
-			seat_pointer_move(seat, seat->hovered);
+		if (seat->op == SEAT_OP_NONE && seat->window_refs.hovered != NULL) {
+			seat_pointer_move(seat, seat->window_refs.hovered);
 		}
 		break;
 	case ACTION_RESIZE:
-		if (seat->op == SEAT_OP_NONE && seat->hovered != NULL) {
-			seat_pointer_resize(seat, seat->hovered,
+		if (seat->op == SEAT_OP_NONE && seat->window_refs.hovered != NULL) {
+			seat_pointer_resize(seat, seat->window_refs.hovered,
 					RIVER_WINDOW_V1_EDGES_BOTTOM | RIVER_WINDOW_V1_EDGES_RIGHT);
 		}
 		break;
@@ -483,8 +512,8 @@ static void seat_manage(struct Seat *seat) {
 	// If no window was interacted with in the current manage sequence,
 	// intentionally pass NULL to ensure the window on top has focus.
 	// This is necessary to handle new windows for example.
-	seat_focus(seat, seat->interacted);
-	seat->interacted = NULL;
+	seat_focus(seat, seat->window_refs.interacted);
+	seat->window_refs.interacted = NULL;
 
 	seat_action(seat, seat->pending_action);
 	seat->pending_action = ACTION_NONE;
@@ -496,16 +525,16 @@ static void seat_manage(struct Seat *seat) {
 		if (seat->op_release) {
 			river_seat_v1_op_end(seat->obj);
 			seat->op = SEAT_OP_NONE;
-			seat->op_window = NULL;
+			seat->window_refs.op_window = NULL;
 			break;
 		}
 		break;
 	case SEAT_OP_RESIZE:
 		if (seat->op_release) {
-			river_window_v1_inform_resize_end(seat->op_window->obj);
+			river_window_v1_inform_resize_end(seat->window_refs.op_window->obj);
 			river_seat_v1_op_end(seat->obj);
 			seat->op = SEAT_OP_NONE;
-			seat->op_window = NULL;
+			seat->window_refs.op_window = NULL;
 			break;
 		}
 		int32_t width = seat->op_start_width;
@@ -523,7 +552,7 @@ static void seat_manage(struct Seat *seat) {
 			height += seat->op_dy;
 		}
 		river_window_v1_propose_dimensions(
-				seat->op_window->obj, width > 1 ? width : 1, height > 1 ? height : 1);
+				seat->window_refs.op_window->obj, width > 1 ? width : 1, height > 1 ? height : 1);
 		break;
 	}
 	seat->op_release = false;
@@ -535,44 +564,71 @@ static void seat_render(struct Seat *seat) {
 		break;
 	case SEAT_OP_MOVE:
 		window_set_position(
-				seat->op_window, seat->op_start_x + seat->op_dx, seat->op_start_y + seat->op_dy);
+				seat->window_refs.op_window, seat->op_start_x + seat->op_dx,
+				seat->op_start_y + seat->op_dy);
 		break;
 	case SEAT_OP_RESIZE:;
 		int32_t x = seat->op_start_x;
 		int32_t y = seat->op_start_y;
 		if ((seat->op_edges & RIVER_WINDOW_V1_EDGES_LEFT) != 0) {
-			x += seat->op_start_width - seat->op_window->rect.width;
+			x += seat->op_start_width - seat->window_refs.op_window->rect.width;
 		}
 		if ((seat->op_edges & RIVER_WINDOW_V1_EDGES_TOP) != 0) {
-			y += seat->op_start_height - seat->op_window->rect.height;
+			y += seat->op_start_height - seat->window_refs.op_window->rect.height;
 		}
-		window_set_position(seat->op_window, x, y);
+		window_set_position(seat->window_refs.op_window, x, y);
 		break;
 	}
 }
 
 static void wm_handle_unavailable(void *data, struct river_window_manager_v1 *obj) {
 	fprintf(stderr, "error: another window manager is already running\n");
-	exit(1);
+	river_window_manager_v1_destroy(obj);
+	window_manager_v1 = NULL;
+	if (xkb_bindings_v1 != NULL) {
+		river_xkb_bindings_v1_destroy(xkb_bindings_v1);
+		xkb_bindings_v1 = NULL;
+	}
+	exit_status = 1;
+	should_exit = true;
 }
 
 static void wm_handle_finished(void *data, struct river_window_manager_v1 *obj) {
-	exit(0);
+	struct Output *output, *output_tmp;
+	wl_list_for_each_safe(output, output_tmp, &wm.outputs, link) {
+		output_destroy(output, true);
+	}
+	struct Seat *seat, *seat_tmp;
+	wl_list_for_each_safe(seat, seat_tmp, &wm.seats, link) {
+		seat_destroy(seat, true);
+	}
+	struct Window *window, *window_tmp;
+	wl_list_for_each_safe(window, window_tmp, &wm.windows, link) {
+		window_destroy(window, true);
+	}
+	river_window_manager_v1_destroy(obj);
+	window_manager_v1 = NULL;
+	if (xkb_bindings_v1 != NULL) {
+		river_xkb_bindings_v1_destroy(xkb_bindings_v1);
+		xkb_bindings_v1 = NULL;
+	}
+	should_exit = true;
 }
 
 static void wm_handle_manage_start(void *data, struct river_window_manager_v1 *obj) {
-	// Destroy closed windows and removed outputs/seats
+	// Removed seats must be destroyed before closed windows so no requests are
+	// sent to a seat after its removed event.
 	struct Output *output, *output_tmp;
 	wl_list_for_each_safe(output, output_tmp, &wm.outputs, link) {
 		output_maybe_destroy(output);
 	}
-	struct Window *window, *window_tmp;
-	wl_list_for_each_safe(window, window_tmp, &wm.windows, link) {
-		window_maybe_destroy(window);
-	}
 	struct Seat *seat, *seat_tmp;
 	wl_list_for_each_safe(seat, seat_tmp, &wm.seats, link) {
 		seat_maybe_destroy(seat);
+	}
+	struct Window *window, *window_tmp;
+	wl_list_for_each_safe(window, window_tmp, &wm.windows, link) {
+		window_maybe_destroy(window);
 	}
 
 	// Carry out window management policy
@@ -601,6 +657,7 @@ static void wm_handle_window(
 	window->obj = river_window;
 	window->node = river_window_v1_get_node(window->obj);
 	window->new = true;
+	river_window_v1_set_user_data(window->obj, window);
 
 	river_window_v1_add_listener(window->obj, &river_window_listener, window);
 
@@ -622,6 +679,7 @@ static void wm_handle_seat(
 	struct Seat *seat = calloc(1, sizeof(struct Seat));
 	seat->obj = river_seat;
 	seat->new = true;
+	river_seat_v1_set_user_data(seat->obj, seat);
 	wl_list_init(&seat->xkb_bindings);
 	wl_list_init(&seat->pointer_bindings);
 
@@ -671,7 +729,7 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(void) {
-	struct wl_display *display = wl_display_connect(NULL);
+	display = wl_display_connect(NULL);
 	if (display == NULL) {
 		fprintf(stderr, "failed to connect to Wayland server\n");
 		return 1;
@@ -684,7 +742,7 @@ int main(void) {
 	// Ensure children are automatically reaped.
 	signal(SIGCHLD, SIG_IGN);
 
-	struct wl_registry *registry = wl_display_get_registry(display);
+	registry = wl_display_get_registry(display);
 	wl_registry_add_listener(registry, &registry_listener, NULL);
 	if (wl_display_roundtrip(display) < 0) {
 		fprintf(stderr, "roundtrip failed\n");
@@ -702,12 +760,17 @@ int main(void) {
 
 	river_window_manager_v1_add_listener(window_manager_v1, &wm_listener, NULL);
 
-	while (true) {
+	while (!should_exit) {
 		if (wl_display_dispatch(display) < 0) {
 			fprintf(stderr, "dispatch failed\n");
-			return 1;
+			exit_status = 1;
+			break;
 		}
 	}
 
-	return 0;
+	if (registry != NULL) {
+		wl_registry_destroy(registry);
+	}
+	wl_display_disconnect(display);
+	return exit_status;
 }

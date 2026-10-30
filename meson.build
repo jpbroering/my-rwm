@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2026 Isaac Freund
+# SPDX-FileCopyrightText: © 2026 João Paulo Broering
 # SPDX-License-Identifier: 0BSD
 
 project(
@@ -30,6 +31,7 @@ generated = wl_mod.scan_xml(
 exe = executable(
   'tinyrwm',
   'tinyrwm.c',
+  'lifecycle.c',
   generated,
   dependencies: [
     wayland_client,
@@ -37,3 +39,28 @@ exe = executable(
   ],
   install: true,
 )
+
+lifecycle_test = executable(
+  'test-lifecycle',
+  'tests/test_lifecycle.c',
+  'lifecycle.c',
+)
+test('lifecycle references', lifecycle_test)
+
+protocol_lifecycle_test = executable(
+  'test-protocol-lifecycle',
+  'tests/test_protocol_lifecycle.c',
+  'lifecycle.c',
+  generated,
+  dependencies: [wayland_client, xkbcommon],
+)
+foreach scenario : [
+  'seat-removed-resizing',
+  'seat-removed-moving',
+  'window-closed-resizing',
+  'seat-and-window-removed',
+  'manager-finished',
+  'manager-unavailable',
+]
+  test('protocol lifecycle ' + scenario, protocol_lifecycle_test, args: [scenario])
+endforeach
