@@ -31,7 +31,8 @@ topic branches hold individual changes. Releases are identified by tags.
   reviewable change; a large plan step can span several branches.
 - Continue an existing branch when the task belongs to that change. If a new
   branch requires unmerged work, make the dependency explicit and initially
-  target the parent branch in its PR; retarget `main` after the parent merges.
+  target the parent branch in its PR. Merge parents before children, then retarget
+  each child to `main` and inspect its diff before deleting its parent branch.
 - Inspect the working tree before switching branches and preserve unrelated
   edits and untracked files.
 - When `main` advances, merge it into active shared branches as needed. Preserve
@@ -76,6 +77,9 @@ is not required. Record checks actually completed and their limitations.
 
 - Publishing branches, opening PRs, merging, and publishing releases must fit
   the user's authorized workflow. Carry existing authorization forward.
+- Before publishing, compare local and remote integration branches. Put accepted
+  local work that has not reached GitHub into focused PRs; synchronizing a local
+  `main` is not a reason to bypass review by pushing it directly.
 - Open one focused PR per reviewable change, normally targeting `main`. Link
   existing issues or the relevant plan step when applicable.
 - Describe the resulting behavior, relevant design decisions, validation, and
