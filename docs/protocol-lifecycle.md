@@ -47,9 +47,27 @@ events that carry protocol objects can be mapped back to manager state. A window
 close clears all seat references to it, ends any live pointer operation on a
 remaining seat, clears its user data, destroys its node and window proxies, and
 then frees the model object. Seat removal clears window pointer-request
-references before destroying the seat and its bindings. Manager shutdown
-destroys all remaining child objects before releasing the manager and XKB
-globals.
+references before freeing the seat. If the seat was resizing a surviving window,
+tinyRWM first sends `inform_resize_end` to that window. It does not send this
+request to a closed window or after manager `finished`, nor does it send
+`op_end` to a removed seat. The seat's bindings are destroyed before its proxy.
+Manager shutdown destroys all remaining child objects before releasing the
+manager and XKB globals. The `unavailable` event is guaranteed to be the first
+and only manager event, so there are no child objects to clean up on that path.
 
 The seat/window reference cleanup helpers are independent of Wayland, so the
 test suite can exercise them without a compositor session.
+
+## Lifecycle regression coverage
+
+`meson test -C build --print-errorlogs` runs the reference helper test and six
+request-level scenarios: seat removal during resize or move, window closure
+during resize, simultaneous seat/window removal, manager `finished`, and manager
+`unavailable`. Assertions remain enabled in these tests even when the project
+is built with `b_ndebug=true`.
+
+The request tests call the actual manager callbacks and capture the generated
+Wayland requests over a local socket pair. They verify reference cleanup and
+that teardown avoids state requests to closed windows or removed seats. They
+need only the normal build dependencies; they do not launch or validate behavior
+against a compositor. Nested River integration and CI remain part of Step 6.

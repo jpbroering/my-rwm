@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2026 João Paulo Broering
 // SPDX-License-Identifier: 0BSD
 
+#undef NDEBUG
 #include <assert.h>
 #include <stddef.h>
 

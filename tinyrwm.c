@@ -380,6 +380,12 @@ static void seat_destroy(struct Seat *seat, bool manager_finished) {
 		return;
 	}
 
+	struct Window *op_window = seat->window_refs.op_window;
+	if (!manager_finished && seat->op == SEAT_OP_RESIZE &&
+			op_window != NULL && !op_window->closed) {
+		river_window_v1_inform_resize_end(op_window->obj);
+	}
+
 	struct XkbBinding *xkb_binding, *xkb_binding_tmp;
 	wl_list_for_each_safe(xkb_binding, xkb_binding_tmp, &seat->xkb_bindings, link) {
 		xkb_binding_destroy(xkb_binding);

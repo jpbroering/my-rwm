@@ -38,5 +38,6 @@ river -c ./build/tinyrwm
 The current River protocol interactions, build setup, and object ownership are
 documented in [`docs/protocol-lifecycle.md`](docs/protocol-lifecycle.md).
 
-The independent lifecycle unit test is included in the Meson test suite and
-can be run with `meson test -C build`.
+Lifecycle reference and Wayland request regression tests are included in the
+Meson test suite and can be run with `meson test -C build --print-errorlogs`.
+They use the normal build dependencies and run without a live compositor.

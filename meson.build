@@ -46,3 +46,21 @@ lifecycle_test = executable(
   'lifecycle.c',
 )
 test('lifecycle references', lifecycle_test)
+
+protocol_lifecycle_test = executable(
+  'test-protocol-lifecycle',
+  'tests/test_protocol_lifecycle.c',
+  'lifecycle.c',
+  generated,
+  dependencies: [wayland_client, xkbcommon],
+)
+foreach scenario : [
+  'seat-removed-resizing',
+  'seat-removed-moving',
+  'window-closed-resizing',
+  'seat-and-window-removed',
+  'manager-finished',
+  'manager-unavailable',
+]
+  test('protocol lifecycle ' + scenario, protocol_lifecycle_test, args: [scenario])
+endforeach
