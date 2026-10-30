@@ -25,3 +25,8 @@ tinyRWM is a C window manager for River. Read [`PLAN.md`](PLAN.md) before implem
 - Inspect the current working tree before editing. Preserve unrelated or untracked user work.
 - Keep changes focused on the requested behavior and update `PLAN.md` or `README.md` when implementation changes make their descriptions inaccurate.
 - Do not claim a build or test passed unless it was actually run and completed successfully.
+
+## Version control
+
+- Read and follow [`CONTRIBUTING.md`](CONTRIBUTING.md) before implementation or Git operations. It defines branch naming, incremental commits, pull requests, merges, and releases.
+- Implementation and documentation requests authorize local task branches and commits unless the user requests otherwise. Commit each coherent working increment as implementation progresses, including its tests and documentation.
