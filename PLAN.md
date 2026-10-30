@@ -107,6 +107,15 @@ window. Automated reference and Wayland request tests cover close, removal, and
 manager teardown. These tests run without a compositor; nested River integration
 and CI remain in Step 6.
 
+Step 2 is implemented in the independent `model.c`/`model.h` module and connected
+to River output geometry, window hints, insertion, and removal. Outputs own
+workspace arrays; workspaces own BSP trees and window/focus state. Automatic
+tiling, directional model focus, swaps, split resizing, branch collapse, and
+minimum-size constraints have automated coverage. `docs/model.md` records the
+deterministic rules and ownership. Step 3, workspace/window actions and keyboard
+integration, is next; workspaces currently remain on number 1, and floating
+toggles are not yet exposed.
+
 ## Completion criteria
 
 - All product requirements above are implemented and documented.
