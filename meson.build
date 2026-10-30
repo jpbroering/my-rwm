@@ -32,6 +32,7 @@ exe = executable(
   'tinyrwm',
   'tinyrwm.c',
   'lifecycle.c',
+  'model.c',
   generated,
   dependencies: [
     wayland_client,
@@ -51,6 +52,7 @@ protocol_lifecycle_test = executable(
   'test-protocol-lifecycle',
   'tests/test_protocol_lifecycle.c',
   'lifecycle.c',
+  'model.c',
   generated,
   dependencies: [wayland_client, xkbcommon],
 )
@@ -61,6 +63,15 @@ foreach scenario : [
   'seat-and-window-removed',
   'manager-finished',
   'manager-unavailable',
+  'tiled-layout',
+  'output-removal',
+  'tiled-pointer',
+  'focused-insertion',
 ]
   test('protocol lifecycle ' + scenario, protocol_lifecycle_test, args: [scenario])
+endforeach
+
+model_test = executable('test-model', 'tests/test_model.c', 'model.c')
+foreach scenario : ['outputs', 'splits', 'focus', 'swaps', 'resize', 'remove', 'minima', 'transitions']
+  test('model ' + scenario, model_test, args: [scenario])
 endforeach

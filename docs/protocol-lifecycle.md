@@ -6,8 +6,8 @@ SPDX-License-Identifier: 0BSD
 # River protocol lifecycle
 
 This document records the protocol and ownership behavior of the current tinyRWM
-implementation. It describes the baseline before workspace and BSP state are
-introduced.
+implementation, including the workspace and BSP ownership added in Step 2.
+Layout and model invariants are described in [model.md](model.md).
 
 ## Build and protocol setup
 
@@ -27,9 +27,11 @@ closed or removed, processes initial window dimensions and input requests,
 updates focus and bindings, then sends `manage_finish`. Window-management state
 requests are confined to this phase.
 
-Each `render_start` applies pending pointer movement or resize positioning and
-ends with `render_finish`. Output position and dimensions events are currently
-ignored, and there is no workspace or tile model yet.
+Output position/dimensions and window minimum-size hints update the independent
+model. Each output owns its workspaces; each workspace owns a BSP tree. Manage
+sequences attach new windows and propose tiled dimensions. Each `render_start`
+applies tile positions and pending floating pointer movement/resize positioning,
+then ends with `render_finish`.
 
 ## Object ownership
 
@@ -38,7 +40,7 @@ ignored, and there is no workspace or tile model yet.
 | `river_window_manager_v1` | Process | After `finished`, or immediately on `unavailable` |
 | `river_xkb_bindings_v1` | Process | After manager shutdown |
 | `river_window_v1` and its `river_node_v1` | `Window` in `wm.windows` | On `closed`, or after manager `finished`; destroy the node before the window |
-| `river_output_v1` | `Output` in `wm.outputs` | On `removed`, or after manager `finished` |
+| `river_output_v1` and model workspaces | `Output` in `wm.outputs` | On `removed`, or after manager `finished`; detach model windows before freeing workspaces |
 | `river_seat_v1` | `Seat` in `wm.seats` | On `removed`, or after manager `finished`; destroy its bindings first |
 | XKB/pointer binding objects | Their owning `Seat` | Before the owning seat is freed |
 
@@ -46,7 +48,7 @@ River object user data points to the corresponding local `Window` or `Seat` so
 events that carry protocol objects can be mapped back to manager state. A window
 close clears all seat references to it, ends any live pointer operation on a
 remaining seat, clears its user data, destroys its node and window proxies, and
-then frees the model object. Seat removal clears window pointer-request
+removes the window from its workspace/BSP tree, then frees the object. Seat removal clears window pointer-request
 references before freeing the seat. If the seat was resizing a surviving window,
 tinyRWM first sends `inform_resize_end` to that window. It does not send this
 request to a closed window or after manager `finished`, nor does it send
@@ -60,11 +62,12 @@ test suite can exercise them without a compositor session.
 
 ## Lifecycle regression coverage
 
-`meson test -C build --print-errorlogs` runs the reference helper test and six
-request-level scenarios: seat removal during resize or move, window closure
-during resize, simultaneous seat/window removal, manager `finished`, and manager
-`unavailable`. Assertions remain enabled in these tests even when the project
-is built with `b_ndebug=true`.
+`meson test -C build --print-errorlogs` runs the reference helper and model tests
+and request-level scenarios: seat removal during resize or move, window closure
+during resize, simultaneous seat/window removal, manager `finished` and
+`unavailable`, plus the tiling and output scenarios described in [model.md](model.md).
+Assertions remain enabled in these tests even when the project is built with
+`b_ndebug=true`.
 
 The request tests call the actual manager callbacks and capture the generated
 Wayland requests over a local socket pair. They verify reference cleanup and

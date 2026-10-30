@@ -15,12 +15,14 @@
 struct Request {
 	uint32_t object;
 	uint16_t opcode;
+	int32_t args[4];
 };
 
 struct Fixture {
 	int peer;
 	struct Window *window;
 	struct Seat *seat;
+	struct Output *output;
 	uint32_t window_id, node_id, seat_id, output_id;
 	struct Request requests[256];
 	size_t request_count;
@@ -55,10 +57,14 @@ static void capture(struct Fixture *fixture) {
 		assert(size >= 8 && size % 4 == 0);
 		assert(i + size / 4 <= bytes / 4);
 		assert(fixture->request_count < sizeof(fixture->requests) / sizeof(fixture->requests[0]));
-		fixture->requests[fixture->request_count++] = (struct Request){
+		struct Request *request = &fixture->requests[fixture->request_count++];
+		*request = (struct Request){
 			.object = wire[i],
 			.opcode = wire[i + 1] & 0xffff,
 		};
+		for (size_t arg = 0; arg < 4 && arg + 2 < size / 4; arg++) {
+			memcpy(&request->args[arg], &wire[i + 2 + arg], sizeof(int32_t));
+		}
 		i += size / 4;
 	}
 }
@@ -82,7 +88,7 @@ static void assert_destroy_only(struct Fixture *fixture, uint32_t object, uint16
 	}
 }
 
-static void fixture_init(struct Fixture *fixture, bool children) {
+static void fixture_init(struct Fixture *fixture, bool children, bool floating) {
 	int fd[2];
 	assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
 	fixture->peer = fd[1];
@@ -105,11 +111,16 @@ static void fixture_init(struct Fixture *fixture, bool children) {
 	wm_handle_output(NULL, window_manager_v1, output);
 	fixture->window = river_window_v1_get_user_data(window);
 	fixture->seat = river_seat_v1_get_user_data(seat);
+	fixture->output = river_output_v1_get_user_data(output);
 	assert(fixture->window != NULL && fixture->seat != NULL);
+	/* These scenarios exercise the existing floating pointer operations. */
+	fixture->window->model.floating = floating;
 	fixture->window_id = object_id(window);
 	fixture->node_id = object_id(fixture->window->node);
 	fixture->seat_id = object_id(seat);
 	fixture->output_id = object_id(output);
+	output_handle_position(fixture->output, output, -100, 50);
+	output_handle_dimensions(fixture->output, output, 1000, 600);
 	wm_handle_manage_start(NULL, window_manager_v1);
 	window_handle_dimensions(fixture->window, window, 640, 480);
 	wm_handle_render_start(NULL, window_manager_v1);
@@ -144,12 +155,119 @@ static void fixture_finish(struct Fixture *fixture) {
 	close(fixture->peer);
 }
 
+static void assert_args(struct Fixture *fixture, void *object, uint16_t opcode, int32_t a, int32_t b) {
+	assert(count(fixture, object_id(object), opcode) == 1);
+	for (size_t i = 0; i < fixture->request_count; i++) {
+		struct Request *request = &fixture->requests[i];
+		if (request->object == object_id(object) && request->opcode == opcode) {
+			assert(request->args[0] == a && request->args[1] == b);
+		}
+	}
+}
+
+static struct Window *create_window(void) {
+	struct river_window_v1 *obj = (void *)wl_proxy_create((void *)display, &river_window_v1_interface);
+	assert(obj != NULL);
+	wm_handle_window(NULL, window_manager_v1, obj);
+	return river_window_v1_get_user_data(obj);
+}
+
+static struct Output *create_output(void) {
+	struct river_output_v1 *obj = (void *)wl_proxy_create((void *)display, &river_output_v1_interface);
+	assert(obj != NULL);
+	wm_handle_output(NULL, window_manager_v1, obj);
+	return river_output_v1_get_user_data(obj);
+}
+
+static void manage_render(struct Fixture *fixture) {
+	wm_handle_manage_start(NULL, window_manager_v1);
+	wm_handle_render_start(NULL, window_manager_v1);
+	capture(fixture);
+}
+
+static void test_tiled_layout(struct Fixture *fixture) {
+	struct Window *a = fixture->window, *b = create_window(), *c = create_window();
+	manage_render(fixture);
+	assert(a->model.workspace == b->model.workspace && b->model.workspace == c->model.workspace);
+	assert_args(fixture, a->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 500, 600);
+	assert_args(fixture, b->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 500, 300);
+	assert_args(fixture, c->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 500, 300);
+	assert_args(fixture, a->node, RIVER_NODE_V1_SET_POSITION, -100, 50);
+	assert_args(fixture, b->node, RIVER_NODE_V1_SET_POSITION, 400, 50);
+	assert_args(fixture, c->node, RIVER_NODE_V1_SET_POSITION, 400, 350);
+	window_handle_closed(b, b->obj);
+	manage_render(fixture);
+	assert_args(fixture, c->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 500, 600);
+	assert(fixture->seat->window_refs.focused == c);
+	output_handle_position(fixture->output, fixture->output->obj, 10, 20);
+	output_handle_dimensions(fixture->output, fixture->output->obj, 1200, 800);
+	window_handle_dimensions_hint(a, a->obj, 900, 0, 0, 0);
+	manage_render(fixture);
+	assert_args(fixture, a->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 900, 800);
+	assert_args(fixture, c->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 300, 800);
+	assert_args(fixture, a->node, RIVER_NODE_V1_SET_POSITION, 10, 20);
+	assert_args(fixture, c->node, RIVER_NODE_V1_SET_POSITION, 910, 20);
+}
+
+static void test_output_removal(struct Fixture *fixture) {
+	struct Output *second = create_output();
+	output_handle_position(second, second->obj, -1200, 0);
+	output_handle_dimensions(second, second->obj, 1200, 800);
+	output_handle_removed(fixture->output, fixture->output->obj);
+	manage_render(fixture);
+	assert(fixture->window->model.workspace->output == &second->model);
+	assert_args(fixture, fixture->window->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 1200, 800);
+	assert_args(fixture, fixture->window->node, RIVER_NODE_V1_SET_POSITION, -1200, 0);
+	output_handle_removed(second, second->obj);
+	manage_render(fixture);
+	assert(!fixture->window->model.workspace && !fixture->window->model.tile);
+	struct Output *third = create_output();
+	output_handle_dimensions(third, third->obj, 800, 600);
+	manage_render(fixture);
+	assert(fixture->window->model.workspace->output == &third->model);
+	assert_args(fixture, fixture->window->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 800, 600);
+}
+
+static void test_tiled_pointer(struct Fixture *fixture) {
+	window_handle_pointer_resize_requested(fixture->window, fixture->window->obj,
+			fixture->seat->obj, RIVER_WINDOW_V1_EDGES_RIGHT);
+	window_handle_pointer_move_requested(fixture->window, fixture->window->obj, fixture->seat->obj);
+	manage_render(fixture);
+	assert(fixture->seat->op == SEAT_OP_NONE && !fixture->seat->window_refs.op_window);
+	assert(fixture->window->model.tile != NULL);
+	assert(count(fixture, fixture->seat_id, RIVER_SEAT_V1_OP_START_POINTER) == 0);
+	assert(count(fixture, fixture->window_id, RIVER_WINDOW_V1_INFORM_RESIZE_START) == 0);
+}
+
+static void test_focused_insertion(struct Fixture *fixture) {
+	struct Window *a = fixture->window, *b = create_window();
+	manage_render(fixture);
+	assert(fixture->seat->window_refs.focused == b);
+	/* Interaction and creation can arrive before the same manage_start. */
+	seat_handle_window_interaction(fixture->seat, fixture->seat->obj, a->obj);
+	struct Window *c = create_window();
+	manage_render(fixture);
+	assert_args(fixture, a->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 500, 300);
+	assert_args(fixture, b->obj, RIVER_WINDOW_V1_PROPOSE_DIMENSIONS, 500, 600);
+	assert_args(fixture, c->node, RIVER_NODE_V1_SET_POSITION, -100, 350);
+}
+
 int main(int argc, char **argv) {
 	assert(argc == 2);
 	struct Fixture fixture = {0};
 	bool unavailable = strcmp(argv[1], "manager-unavailable") == 0;
-	fixture_init(&fixture, !unavailable);
-	if (unavailable) {
+	bool tiled = strcmp(argv[1], "tiled-layout") == 0 || strcmp(argv[1], "output-removal") == 0 ||
+		strcmp(argv[1], "tiled-pointer") == 0 || strcmp(argv[1], "focused-insertion") == 0;
+	fixture_init(&fixture, !unavailable, !tiled);
+	if (strcmp(argv[1], "tiled-layout") == 0) {
+		test_tiled_layout(&fixture);
+	} else if (strcmp(argv[1], "output-removal") == 0) {
+		test_output_removal(&fixture);
+	} else if (strcmp(argv[1], "tiled-pointer") == 0) {
+		test_tiled_pointer(&fixture);
+	} else if (strcmp(argv[1], "focused-insertion") == 0) {
+		test_focused_insertion(&fixture);
+	} else if (unavailable) {
 		wm_handle_unavailable(NULL, window_manager_v1);
 		assert(should_exit && exit_status == 1);
 		capture(&fixture);

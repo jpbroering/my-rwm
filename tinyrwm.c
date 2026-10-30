@@ -20,10 +20,12 @@
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 #include "lifecycle.h"
+#include "model.h"
 
 struct Output {
 	struct river_output_v1 *obj;
 	bool removed;
+	struct ModelOutput model;
 	struct wl_list link; // WindowManager.outputs
 };
 
@@ -42,6 +44,7 @@ struct Window {
 	bool closed;
 
 	struct Rect rect;
+	struct ModelWindow model;
 
 	struct WindowSeatRefs seat_refs;
 	uint32_t pointer_resize_requested_edges;
@@ -122,10 +125,24 @@ static void output_handle_removed(void *data, struct river_output_v1 *obj) {
 	output->removed = true;
 }
 
+static void output_handle_position(void *data, struct river_output_v1 *obj, int32_t x, int32_t y) {
+	struct Output *output = data;
+	struct ModelRect bounds = output->model.bounds;
+	bounds.x = x;
+	bounds.y = y;
+	model_output_set_bounds(&output->model, bounds);
+}
+
+static void output_handle_dimensions(void *data, struct river_output_v1 *obj, int32_t width, int32_t height) {
+	struct Output *output = data;
+	struct ModelRect bounds = output->model.bounds;
+	bounds.width = width;
+	bounds.height = height;
+	model_output_set_bounds(&output->model, bounds);
+}
+
 // Ignored events
 static void output_handle_wl_output(void *data, struct river_output_v1 *obj, uint32_t name) {}
-static void output_handle_position(void *data, struct river_output_v1 *obj, int32_t x, int32_t y) {}
-static void output_handle_dimensions(void *data, struct river_output_v1 *obj, int32_t width, int32_t height) {}
 
 const struct river_output_v1_listener river_output_listener = {
 	.removed = output_handle_removed,
@@ -138,6 +155,7 @@ static void output_destroy(struct Output *output, bool manager_finished) {
 	if (!output->removed && !manager_finished) {
 		return;
 	}
+	model_output_finish(&output->model);
 	river_output_v1_destroy(output->obj);
 	wl_list_remove(&output->link);
 	free(output);
@@ -157,6 +175,12 @@ static void window_handle_dimensions(
 	struct Window *window = data;
 	window->rect.width = width;
 	window->rect.height = height;
+	if (window->model.floating) {
+		window->model.rect.width = width;
+		window->model.rect.height = height;
+		window->model.floating_rect.width = width;
+		window->model.floating_rect.height = height;
+	}
 }
 
 static void window_handle_pointer_move_requested(
@@ -172,8 +196,13 @@ static void window_handle_pointer_resize_requested(
 	window->pointer_resize_requested_edges = edges;
 }
 
+static void window_handle_dimensions_hint(void *data, struct river_window_v1 *obj,
+		int32_t min_width, int32_t min_height, int32_t max_width, int32_t max_height) {
+	struct Window *window = data;
+	model_window_set_minimum(&window->model, min_width, min_height);
+}
+
 // Ignored events
-static void window_handle_dimensions_hint(void *data, struct river_window_v1 *obj, int32_t min_width, int32_t min_height, int32_t max_width, int32_t max_height) {}
 static void window_handle_app_id(void *data, struct river_window_v1 *obj, const char *app_id) {}
 static void window_handle_title(void *data, struct river_window_v1 *obj, const char *title) {}
 static void window_handle_parent(void *data, struct river_window_v1 *obj, struct river_window_v1 *parent) {}
@@ -226,6 +255,7 @@ static void window_destroy(struct Window *window, bool manager_finished) {
 		}
 	}
 
+	model_workspace_remove(&window->model);
 	river_window_v1_set_user_data(window->obj, NULL);
 	river_node_v1_destroy(window->node);
 	river_window_v1_destroy(window->obj);
@@ -241,6 +271,12 @@ static void window_set_position(struct Window *window, int32_t x, int32_t y) {
 	river_node_v1_set_position(window->node, x, y);
 	window->rect.x = x;
 	window->rect.y = y;
+	if (window->model.floating) {
+		window->model.rect.x = x;
+		window->model.rect.y = y;
+		window->model.floating_rect.x = x;
+		window->model.floating_rect.y = y;
+	}
 }
 
 static void seat_pointer_move(struct Seat *seat, struct Window *window);
@@ -249,8 +285,17 @@ static void seat_pointer_resize(struct Seat *seat, struct Window *window, uint32
 static void window_manage(struct Window *window) {
 	if (window->new) {
 		window->new = false;
-		window_set_position(window, 0, 0);
-		river_window_v1_propose_dimensions(window->obj, 0, 0);
+		if (window->model.tile == NULL) {
+			window_set_position(window, 0, 0);
+			river_window_v1_propose_dimensions(window->obj, 0, 0);
+		}
+	}
+	if (window->model.tile != NULL) {
+		struct ModelRect rect = window->model.rect;
+		river_window_v1_set_tiled(window->obj, RIVER_WINDOW_V1_EDGES_TOP |
+				RIVER_WINDOW_V1_EDGES_BOTTOM | RIVER_WINDOW_V1_EDGES_LEFT | RIVER_WINDOW_V1_EDGES_RIGHT);
+		river_window_v1_propose_dimensions(window->obj,
+				rect.width > 0 ? rect.width : 1, rect.height > 0 ? rect.height : 1);
 	}
 	if (window->seat_refs.pointer_move_requested != NULL) {
 		seat_pointer_move(window->seat_refs.pointer_move_requested, window);
@@ -431,9 +476,15 @@ static void seat_focus(struct Seat *seat, struct Window *window) {
 	}
 
 	seat->window_refs.focused = window;
+	if (window != NULL) {
+		model_workspace_focus(&window->model);
+	}
 }
 
 static void seat_pointer_move(struct Seat *seat, struct Window *window) {
+	if (!window->model.floating) {
+		return;
+	}
 	seat_focus(seat, window);
 	river_seat_v1_op_start_pointer(seat->obj);
 	seat->op = SEAT_OP_MOVE;
@@ -445,8 +496,11 @@ static void seat_pointer_move(struct Seat *seat, struct Window *window) {
 }
 
 static void seat_pointer_resize(struct Seat *seat, struct Window *window, uint32_t edges) {
+	if (!window->model.floating) {
+		return;
+	}
 	seat_focus(seat, window);
-    river_window_v1_inform_resize_start(window->obj);
+	river_window_v1_inform_resize_start(window->obj);
 	river_seat_v1_op_start_pointer(seat->obj);
 	seat->op = SEAT_OP_RESIZE;
 	seat->window_refs.op_window = window;
@@ -615,6 +669,22 @@ static void wm_handle_finished(void *data, struct river_window_manager_v1 *obj) 
 	should_exit = true;
 }
 
+static struct Workspace *workspace_for_new_window(void) {
+	struct Seat *seat;
+	wl_list_for_each(seat, &wm.seats, link) {
+		struct Window *focused = seat->window_refs.interacted != NULL ?
+			seat->window_refs.interacted : seat->window_refs.focused;
+		if (focused != NULL && focused->model.workspace != NULL) {
+			return model_output_active(focused->model.workspace->output);
+		}
+	}
+	if (!wl_list_empty(&wm.outputs)) {
+		struct Output *output = wl_container_of(wm.outputs.next, output, link);
+		return model_output_active(&output->model);
+	}
+	return NULL;
+}
+
 static void wm_handle_manage_start(void *data, struct river_window_manager_v1 *obj) {
 	// Removed seats must be destroyed before closed windows so no requests are
 	// sent to a seat after its removed event.
@@ -631,6 +701,23 @@ static void wm_handle_manage_start(void *data, struct river_window_manager_v1 *o
 		window_maybe_destroy(window);
 	}
 
+	// Attach new windows, including survivors of a removed output. Insertion
+	// recalculates the layout so subsequent windows split the new focused tile.
+	wl_list_for_each(seat, &wm.seats, link) {
+		if (seat->window_refs.interacted != NULL) {
+			model_workspace_focus(&seat->window_refs.interacted->model);
+		}
+	}
+	wl_list_for_each(window, &wm.windows, link) {
+		if (window->model.workspace == NULL) {
+			struct Workspace *workspace = workspace_for_new_window();
+			if (workspace != NULL && !model_workspace_add(workspace, &window->model)) {
+				fprintf(stderr, "failed to allocate window layout\n");
+				exit(EXIT_FAILURE);
+			}
+		}
+	}
+
 	// Carry out window management policy
 	wl_list_for_each(window, &wm.windows, link) {
 		window_manage(window);
@@ -643,6 +730,12 @@ static void wm_handle_manage_start(void *data, struct river_window_manager_v1 *o
 }
 
 static void wm_handle_render_start(void *data, struct river_window_manager_v1 *obj) {
+	struct Window *window;
+	wl_list_for_each(window, &wm.windows, link) {
+		if (window->model.tile != NULL) {
+			window_set_position(window, window->model.rect.x, window->model.rect.y);
+		}
+	}
 	struct Seat *seat;
 	wl_list_for_each(seat, &wm.seats, link) {
 		seat_render(seat);
@@ -654,6 +747,7 @@ static void wm_handle_render_start(void *data, struct river_window_manager_v1 *o
 static void wm_handle_window(
 		void *data, struct river_window_manager_v1 *obj, struct river_window_v1 *river_window) {
 	struct Window *window = calloc(1, sizeof(struct Window));
+	model_window_init(&window->model);
 	window->obj = river_window;
 	window->node = river_window_v1_get_node(window->obj);
 	window->new = true;
@@ -667,6 +761,11 @@ static void wm_handle_window(
 static void wm_handle_output(
 		void *data, struct river_window_manager_v1 *obj, struct river_output_v1 *river_output) {
 	struct Output *output = calloc(1, sizeof(struct Output));
+	// Built-in default; runtime configuration is introduced in Step 4.
+	if (!model_output_init(&output->model, 9, (struct ModelRect){0})) {
+		fprintf(stderr, "failed to allocate output workspaces\n");
+		exit(EXIT_FAILURE);
+	}
 	output->obj = river_output;
 
 	river_output_v1_add_listener(output->obj, &river_output_listener, output);

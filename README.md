@@ -42,6 +42,21 @@ Lifecycle reference and Wayland request regression tests are included in the
 Meson test suite and can be run with `meson test -C build --print-errorlogs`.
 They use the normal build dependencies and run without a live compositor.
 
+## Current layout model
+
+New windows automatically tile in a BSP layout, splitting the last focused tile
+along its longer dimension. Each output owns nine independent workspace records;
+workspace 1 is currently active. Output geometry and client minimum-size hints
+feed the layout, and closing a window collapses its empty branch.
+
+The independent model also implements directional focus, leaf swaps, and split
+resizing. Workspace switching/moves, floating toggles, and the planned keyboard
+actions are Step 3. New tiled windows ignore floating pointer move/resize requests.
+Runtime configuration and IPC are later steps.
+
+See [docs/model.md](docs/model.md) for ownership, layout rules, output removal
+behavior, and model test coverage. No new build or runtime dependency is required.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, incremental commits,
