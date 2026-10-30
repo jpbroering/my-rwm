@@ -56,3 +56,8 @@ Runtime configuration and IPC are later steps.
 
 See [docs/model.md](docs/model.md) for ownership, layout rules, output removal
 behavior, and model test coverage. No new build or runtime dependency is required.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, incremental commits,
+pull requests, validation, and release conventions.
